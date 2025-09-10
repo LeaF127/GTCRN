@@ -1,0 +1,12 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[codz]
+*$py.class
+
+logs/
+test_wavs
+testset_noisy
+*.wav
+*.onnx
+*.tar
+*.bin
