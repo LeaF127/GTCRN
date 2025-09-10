@@ -333,8 +333,8 @@ async def denoise_upload(
             logger.info(f"上传文件降噪完成: {file.filename}, 耗时: {processing_time:.2f}s")
             
             # 添加后台任务清理临时文件
+            # 仅清理输入临时文件，输出文件保留用于后续下载
             background_tasks.add_task(cleanup_temp_file, temp_input)
-            background_tasks.add_task(cleanup_temp_file, temp_output)
             
             return DenoiseResponse(
                 success=True,
@@ -352,7 +352,7 @@ async def denoise_upload(
         error_msg = f"上传文件降噪处理失败: {str(e)}"
         logger.error(error_msg)
         
-        # 清理临时文件
+        # 清理临时文件（在失败情况下同时清理输入与输出）
         background_tasks.add_task(cleanup_temp_file, temp_input)
         background_tasks.add_task(cleanup_temp_file, temp_output)
         
@@ -369,6 +369,10 @@ async def download_file(file_id: str):
     返回:
         FileResponse: 音频文件
     """
+    # 防御性检查
+    if temp_dir is None:
+        raise HTTPException(status_code=500, detail="临时目录未初始化")
+    
     file_path = os.path.join(temp_dir, file_id)
     
     if not os.path.exists(file_path):
