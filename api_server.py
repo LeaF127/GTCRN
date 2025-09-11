@@ -27,6 +27,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 import uvicorn
 
+# 导入音频预处理模块
+from utils.audio_preprocessing import preprocess_audio_if_needed, cleanup_temp_file as cleanup_audio_temp_file
+
 # 全局变量
 app = FastAPI(
     title="音频降噪API服务",
@@ -129,10 +132,20 @@ def inference(source_file: str, save_file: str, samplerate: int = 16000) -> dict
     
     T_list = []  # 记录每帧处理时间
     outputs = []  # 存储每帧的输出结果
+    temp_audio_file = None  # 临时音频文件路径
 
     try:
-        # 读取音频文件并转换为张量
-        x = torch.from_numpy(sf.read(source_file, dtype='float32')[0])
+        # 音频预处理：转换为16kHz
+        logger.info(f"开始音频预处理: {source_file}")
+        processed_file, is_temp = preprocess_audio_if_needed(source_file, samplerate)
+        if is_temp:
+            temp_audio_file = processed_file
+            logger.info(f"音频已预处理为16kHz: {processed_file}")
+        else:
+            logger.info("音频采样率已符合要求，跳过预处理")
+        
+        # 读取预处理后的音频文件并转换为张量
+        x = torch.from_numpy(sf.read(processed_file, dtype='float32')[0])
         # 对音频进行短时傅里叶变换(STFT)，转换为频域表示
         x = torch.stft(x, 512, 256, 512, torch.hann_window(512).pow(0.5), return_complex=False)[None]
 
@@ -185,6 +198,10 @@ def inference(source_file: str, save_file: str, samplerate: int = 16000) -> dict
             "processing_times": [],
             "total_frames": 0
         }
+    finally:
+        # 清理临时音频文件
+        if temp_audio_file:
+            cleanup_audio_temp_file(temp_audio_file)
 
 def cleanup_temp_file(file_path: str):
     """清理临时文件"""

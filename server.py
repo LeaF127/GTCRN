@@ -23,6 +23,9 @@ import soundfile as sf
 from tqdm import tqdm
 from librosa import istft
 
+# 导入音频预处理模块
+from utils.audio_preprocessing import preprocess_audio_if_needed, cleanup_temp_file as cleanup_audio_temp_file
+
 print('init SeparateSpeech...')
 
 # 依赖安装说明：pip install loguru
@@ -50,39 +53,58 @@ def inference(source_file, save_file, samplerate):
     """
     T_list = []  # 记录每帧处理时间
     outputs = []  # 存储每帧的输出结果
+    temp_audio_file = None  # 临时音频文件路径
 
-    # 读取音频文件并转换为张量
-    x = torch.from_numpy(sf.read(source_file, dtype='float32')[0])
-    # 对音频进行短时傅里叶变换(STFT)，转换为频域表示
-    x = torch.stft(x, 512, 256, 512, torch.hann_window(512).pow(0.5), return_complex=False)[None]
+    try:
+        # 音频预处理：转换为16kHz
+        logger.info(f"开始音频预处理: {source_file}")
+        processed_file, is_temp = preprocess_audio_if_needed(source_file, samplerate)
+        if is_temp:
+            temp_audio_file = processed_file
+            logger.info(f"音频已预处理为16kHz: {processed_file}")
+        else:
+            logger.info("音频采样率已符合要求，跳过预处理")
 
-    # 初始化模型缓存，用于流式处理
-    conv_cache = np.zeros([2, 1, 16, 16, 33],  dtype="float32")  # 卷积层缓存
-    tra_cache = np.zeros([2, 3, 1, 1, 16],  dtype="float32")     # Transformer缓存
-    inter_cache = np.zeros([2, 1, 33, 16],  dtype="float32")     # 中间层缓存
+        # 读取预处理后的音频文件并转换为张量
+        x = torch.from_numpy(sf.read(processed_file, dtype='float32')[0])
+        # 对音频进行短时傅里叶变换(STFT)，转换为频域表示
+        x = torch.stft(x, 512, 256, 512, torch.hann_window(512).pow(0.5), return_complex=False)[None]
 
-    inputs = x.numpy()
-    # 逐帧处理音频数据
-    for i in tqdm(range(inputs.shape[-2])):
-        tic = time.perf_counter()
+        # 初始化模型缓存，用于流式处理
+        conv_cache = np.zeros([2, 1, 16, 16, 33],  dtype="float32")  # 卷积层缓存
+        tra_cache = np.zeros([2, 3, 1, 1, 16],  dtype="float32")     # Transformer缓存
+        inter_cache = np.zeros([2, 1, 33, 16],  dtype="float32")     # 中间层缓存
+
+        inputs = x.numpy()
+        # 逐帧处理音频数据
+        for i in tqdm(range(inputs.shape[-2])):
+            tic = time.perf_counter()
+            
+            # 运行ONNX模型推理，输入当前帧和缓存状态
+            out_i, conv_cache, tra_cache, inter_cache \
+                    = session.run([], {'mix': inputs[..., i:i+1, :],
+                        'conv_cache': conv_cache,
+                        'tra_cache': tra_cache,
+                        'inter_cache': inter_cache})
+
+            toc = time.perf_counter()
+            T_list.append(toc-tic)  # 记录处理时间
+            outputs.append(out_i)   # 保存输出结果
+
+        # 将所有帧的输出结果拼接
+        outputs = np.concatenate(outputs, axis=2)
+        # 将频域结果转换回时域音频信号
+        enhanced = istft(outputs[...,0] + 1j * outputs[...,1], n_fft=512, hop_length=256, win_length=512, window=np.hanning(512)**0.5)
+        # 保存降噪后的音频文件
+        sf.write(save_file, enhanced.squeeze(), samplerate)
         
-        # 运行ONNX模型推理，输入当前帧和缓存状态
-        out_i, conv_cache, tra_cache, inter_cache \
-                = session.run([], {'mix': inputs[..., i:i+1, :],
-                    'conv_cache': conv_cache,
-                    'tra_cache': tra_cache,
-                    'inter_cache': inter_cache})
-
-        toc = time.perf_counter()
-        T_list.append(toc-tic)  # 记录处理时间
-        outputs.append(out_i)   # 保存输出结果
-
-    # 将所有帧的输出结果拼接
-    outputs = np.concatenate(outputs, axis=2)
-    # 将频域结果转换回时域音频信号
-    enhanced = istft(outputs[...,0] + 1j * outputs[...,1], n_fft=512, hop_length=256, win_length=512, window=np.hanning(512)**0.5)
-    # 保存降噪后的音频文件
-    sf.write(save_file, enhanced.squeeze(), samplerate)
+    except Exception as e:
+        logger.error(f"音频降噪处理失败: {e}")
+        raise
+    finally:
+        # 清理临时音频文件
+        if temp_audio_file:
+            cleanup_audio_temp_file(temp_audio_file)
 
     
 def DenoiseWorker(input_file_path, output_file_path, client_addr, server):
